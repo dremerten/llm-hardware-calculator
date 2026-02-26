@@ -1,0 +1,8 @@
+services:
+  llm-hardware-calculator:
+    build: .
+    container_name: llm-hardware-calculator
+    environment:
+      - PORT=${PORT:-3000}
+    ports:
+      - '${PORT:-3000}:8080'

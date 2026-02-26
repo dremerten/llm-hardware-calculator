@@ -1,0 +1,210 @@
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: global-gateway
+  namespace: nginx-gateway
+spec:
+  gatewayClassName: nginx
+  listeners:
+  - name: acme-http
+    hostname: "*.dremer10.com"
+    port: 80
+    protocol: HTTP
+    allowedRoutes:
+      namespaces:
+        from: All
+  - name: devops-toolkit
+    hostname: devops-toolkit.dremer10.com
+    port: 443
+    protocol: HTTPS
+    tls:
+      mode: Terminate
+      certificateRefs:
+      - name: devops-toolkit-production-tls
+        kind: Secret
+    allowedRoutes:
+      namespaces:
+        from: All
+  - name: devops-toolkit-staging
+    hostname: staging-devops-toolkit.dremer10.com
+    port: 443
+    protocol: HTTPS
+    tls:
+      mode: Terminate
+      certificateRefs:
+      - name: devops-toolkit-staging-tls
+        kind: Secret
+    allowedRoutes:
+      namespaces:
+        from: All
+  - name: devops-toolkit-qa
+    hostname: qa-devops-toolkit.dremer10.com
+    port: 443
+    protocol: HTTPS
+    tls:
+      mode: Terminate
+      certificateRefs:
+      - name: devops-toolkit-qa-tls
+        kind: Secret
+    allowedRoutes:
+      namespaces:
+        from: All
+  - name: devops-toolkit-dev
+    hostname: dev-devops-toolkit.dremer10.com
+    port: 443
+    protocol: HTTPS
+    tls:
+      mode: Terminate
+      certificateRefs:
+      - name: devops-toolkit-dev-tls
+        kind: Secret
+    allowedRoutes:
+      namespaces:
+        from: All
+  - name: grafana
+    hostname: grafana.devops-toolkit.dremer10.com
+    port: 443
+    protocol: HTTPS
+    tls:
+      mode: Terminate
+      certificateRefs:
+      - name: grafana-tls
+        kind: Secret
+    allowedRoutes:
+      namespaces:
+        from: All
+  - name: grafana-staging
+    hostname: grafana-staging.devops-toolkit.dremer10.com
+    port: 443
+    protocol: HTTPS
+    tls:
+      mode: Terminate
+      certificateRefs:
+      - name: grafana-staging-tls
+        kind: Secret
+    allowedRoutes:
+      namespaces:
+        from: All
+  - name: pub-site-prod
+    hostname: info.dremer10.com
+    port: 443
+    protocol: HTTPS
+    tls:
+      mode: Terminate
+      certificateRefs:
+      - name: pub-site-production-tls
+        kind: Secret
+    allowedRoutes:
+      namespaces:
+        from: All
+
+  - name: calc-prod
+    hostname: calc.dremer10.com
+    port: 443
+    protocol: HTTPS
+    tls:
+      mode: Terminate
+      certificateRefs:
+      - name: calc-production-tls
+        kind: Secret
+    allowedRoutes:
+      namespaces:
+        from: All
+
+  - name: pub-site-staging
+    hostname: info-staging.dremer10.com
+    port: 443
+    protocol: HTTPS
+    tls:
+      mode: Terminate
+      certificateRefs:
+      - name: pub-site-staging-tls
+        kind: Secret
+    allowedRoutes:
+      namespaces:
+        from: All
+
+  - name: calc-staging
+    hostname: calc-staging.dremer10.com
+    port: 443
+    protocol: HTTPS
+    tls:
+      mode: Terminate
+      certificateRefs:
+      - name: calc-staging-tls
+        kind: Secret
+    allowedRoutes:
+      namespaces:
+        from: All
+  - name: iac-sandbox-prod
+    hostname: iac-sandbox.dremer10.com
+    port: 443
+    protocol: HTTPS
+    tls:
+      mode: Terminate
+      certificateRefs:
+      - name: iac-sandbox-prod-tls
+        kind: Secret
+    allowedRoutes:
+      namespaces:
+        from: All
+  - name: iac-sandbox-staging
+    hostname: iac-sandbox-staging.dremer10.com
+    port: 443
+    protocol: HTTPS
+    tls:
+      mode: Terminate
+      certificateRefs:
+      - name: iac-sandbox-staging-tls
+        kind: Secret
+    allowedRoutes:
+      namespaces:
+        from: All
+  - name: quiz
+    hostname: quiz.dremer10.com
+    port: 443
+    protocol: HTTPS
+    tls:
+      mode: Terminate
+      certificateRefs:
+      - name: quiz-production-tls
+        kind: Secret
+    allowedRoutes:
+      namespaces:
+        from: All
+  - name: quiz-staging
+    hostname: quiz-staging.dremer10.com
+    port: 443
+    protocol: HTTPS
+    tls:
+      mode: Terminate
+      certificateRefs:
+      - name: quiz-staging-tls
+        kind: Secret
+    allowedRoutes:
+      namespaces:
+        from: All
+  - name: solar-dev
+    hostname: solar-dev.dremer10.com
+    port: 443
+    protocol: HTTPS
+    tls:
+      mode: Terminate
+      certificateRefs:
+      - name: solar-dev-tls
+        kind: Secret
+    allowedRoutes:
+      namespaces:
+        from: All
+  - name: solar-prod
+    hostname: solar.dremer10.com
+    port: 443
+    protocol: HTTPS
+    tls:
+      mode: Terminate
+      certificateRefs:
+      - name: solar-system-prod-tls
+        kind: Secret
+    allowedRoutes:
+      namespaces:
+        from: All

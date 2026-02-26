@@ -1,0 +1,371 @@
+name: Build and Deploy
+
+# Workflow Behavior:
+# - Feature branch push: Deploy to staging (commit-tagged image)
+# - PR to main: Test + Scan via pr-tests.yml (no deployment)
+# - Main push: Test + Scan + deploy to production
+
+on:
+  push:
+    branches: [ "**" ]
+
+concurrency:
+  group: calc-${{ github.event.pull_request.head.ref || github.ref_name }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  pull-requests: read
+  security-events: write
+
+env:
+  IMAGE_NAME: ${{ vars.DOCKERHUB_USERNAME }}/llm-hardware-calculator
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    environment: ${{ github.ref == 'refs/heads/main' && 'production' || 'staging' }}
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      create_tag: ${{ steps.version.outputs.create_tag }}
+      short_sha: ${{ steps.meta.outputs.short_sha }}
+      ref_name: ${{ github.ref_name }}
+      display_version: ${{ steps.version.outputs.display_version }}
+      commit_tag: ${{ steps.meta.outputs.commit_tag }}
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+
+    - name: Derive short SHA
+      id: meta
+      run: |
+        short="${GITHUB_SHA::7}"
+        echo "short_sha=${short}" >> "$GITHUB_OUTPUT"
+        echo "commit_tag=commit-${short}" >> "$GITHUB_OUTPUT"
+
+    - name: Determine build version
+      id: version
+      env:
+        SHORT_SHA: ${{ steps.meta.outputs.short_sha }}
+      run: |
+        set -euo pipefail
+        git fetch --tags
+
+        if [ "${GITHUB_REF_NAME}" != "main" ]; then
+          version="commit-${SHORT_SHA}"
+          display_version="${version}"
+          create_tag="false"
+        else
+          current_tag="$(git tag --points-at HEAD "v*" | sort -V | tail -n1 || true)"
+          if [ -n "$current_tag" ]; then
+            version="${current_tag#v}"
+            create_tag="false"
+          else
+            latest_tag="$(git tag -l "v*" | sort -V | tail -n1)"
+            if [ -z "$latest_tag" ]; then
+              version="1.0.0"
+            else
+              current="${latest_tag#v}"
+              IFS='.' read -r major minor patch <<<"$current"
+              major=${major:-1}
+              minor=${minor:-0}
+              patch=${patch:-0}
+              patch=$((patch + 1))
+              version="${major}.${minor}.${patch}"
+            fi
+            create_tag="true"
+          fi
+          display_version="${version}"
+        fi
+
+        echo "version=$version" >> "$GITHUB_OUTPUT"
+        echo "create_tag=$create_tag" >> "$GITHUB_OUTPUT"
+        echo "display_version=$display_version" >> "$GITHUB_OUTPUT"
+
+    - name: Build Docker image (calc)
+      uses: docker/build-push-action@v5
+      with:
+        context: .
+        file: ./Dockerfile
+        tags: |
+          ${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.commit_tag }}
+        outputs: type=docker,dest=/tmp/image.tar
+        cache-from: type=registry,ref=${{ env.IMAGE_NAME }}:latest
+        cache-to: type=inline
+        build-args: |
+          VITE_APP_VERSION=${{ steps.version.outputs.display_version }}
+
+    - name: Load image (main only)
+      if: github.ref == 'refs/heads/main'
+      run: |
+        set -euo pipefail
+        docker load --input /tmp/image.tar
+
+    - name: Log in to Docker Hub (main only)
+      if: github.ref == 'refs/heads/main'
+      uses: docker/login-action@v3
+      with:
+        username: ${{ vars.DOCKERHUB_USERNAME }}
+        password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+    - name: Push image (commit tag, main only)
+      if: github.ref == 'refs/heads/main'
+      run: |
+        set -euo pipefail
+        docker push "${IMAGE_NAME}:${{ steps.meta.outputs.commit_tag }}"
+
+    - name: Upload Docker image artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: calc-image
+        path: /tmp/image.tar
+        retention-days: 1
+
+  test:
+    needs: build
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    environment: production
+    env:
+      IMAGE_TAG: ${{ needs.build.outputs.commit_tag }}
+
+    steps:
+    - name: Log in to Docker Hub
+      uses: docker/login-action@v3
+      with:
+        username: ${{ vars.DOCKERHUB_USERNAME }}
+        password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+    - name: Pull promoted image
+      run: |
+        docker pull "${IMAGE_NAME}:${IMAGE_TAG}"
+
+    - name: Test Docker image
+      run: |
+        docker run -d -p 8080:8080 --name test-container ${{ env.IMAGE_NAME }}:${IMAGE_TAG}
+        sleep 5
+        docker ps | grep test-container
+        curl -f -s http://localhost:8080 | grep -q "Hardware Calculator" || exit 1
+        HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8080)
+        if [ "$HTTP_CODE" != "200" ]; then
+          echo "Error: Expected HTTP 200, got $HTTP_CODE"
+          exit 1
+        fi
+        docker stop test-container
+        docker rm test-container
+
+  scan:
+    needs: build
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    environment: production
+    env:
+      IMAGE_TAG: ${{ needs.build.outputs.commit_tag }}
+
+    steps:
+    - name: Log in to Docker Hub
+      uses: docker/login-action@v3
+      with:
+        username: ${{ vars.DOCKERHUB_USERNAME }}
+        password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+    - name: Run Trivy vulnerability scanner
+      uses: aquasecurity/trivy-action@master
+      with:
+        image-ref: ${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}
+        format: 'sarif'
+        output: 'trivy-results.sarif'
+        severity: 'CRITICAL,HIGH'
+
+    - name: Upload Trivy results to GitHub Security tab
+      uses: github/codeql-action/upload-sarif@v4
+      if: always() && hashFiles('trivy-results.sarif') != ''
+      with:
+        sarif_file: 'trivy-results.sarif'
+
+    - name: Run Trivy vulnerability scanner (table output)
+      uses: aquasecurity/trivy-action@master
+      with:
+        image-ref: ${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}
+        format: 'table'
+        exit-code: '1'
+        ignore-unfixed: true
+        severity: 'CRITICAL,HIGH'
+
+  push-production:
+    needs: [build, test, scan]
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    environment: production
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: Log in to Docker Hub
+      uses: docker/login-action@v3
+      with:
+        username: ${{ vars.DOCKERHUB_USERNAME }}
+        password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+    - name: Create git tag for release
+      if: needs.build.outputs.create_tag == 'true'
+      env:
+        VERSION: ${{ needs.build.outputs.version }}
+      run: |
+        set -euo pipefail
+        git fetch --tags
+        if git rev-parse "v${VERSION}" >/dev/null 2>&1; then
+          echo "Tag v${VERSION} already exists, skipping creation."
+        else
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag -a "v${VERSION}" -m "Release v${VERSION}"
+          git push origin "v${VERSION}"
+        fi
+
+    - name: Pull source image to promote
+      env:
+        SOURCE_COMMIT_TAG: ${{ needs.build.outputs.commit_tag }}
+      run: |
+        set -euo pipefail
+        docker pull "${IMAGE_NAME}:${SOURCE_COMMIT_TAG}"
+
+    - name: Tag and push image
+      env:
+        VERSION: ${{ needs.build.outputs.version }}
+        SOURCE_COMMIT_TAG: ${{ needs.build.outputs.commit_tag }}
+      run: |
+        set -euo pipefail
+        IMG="${IMAGE_NAME}"
+        docker tag "$IMG:${SOURCE_COMMIT_TAG}" "$IMG:latest"
+        docker tag "$IMG:${SOURCE_COMMIT_TAG}" "$IMG:${VERSION}"
+        docker push "$IMG:${VERSION}"
+        docker push "$IMG:latest"
+
+  push-staging:
+    needs: build
+    runs-on: ubuntu-latest
+    if: github.ref != 'refs/heads/main' && github.event_name == 'push'
+    environment: staging
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Log in to Docker Hub
+      uses: docker/login-action@v3
+      with:
+        username: ${{ vars.DOCKERHUB_USERNAME }}
+        password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+    - name: Download Docker image artifact
+      uses: actions/download-artifact@v4
+      with:
+        name: calc-image
+        path: /tmp
+
+    - name: Load Docker image
+      run: |
+        docker load --input /tmp/image.tar
+
+    - name: Push image (commit tag)
+      env:
+        COMMIT_TAG: ${{ needs.build.outputs.commit_tag }}
+      run: |
+        set -euo pipefail
+        docker push "${IMAGE_NAME}:${COMMIT_TAG}"
+
+  deploy-production:
+    needs: [push-production, build]
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    environment: production
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up kubectl
+      uses: azure/setup-kubectl@v4
+
+    - name: Configure kubeconfig
+      run: |
+        set -euo pipefail
+        mkdir -p "$RUNNER_TEMP/kube"
+        printf '%s' "${{ secrets.KUBE_CONFIG_B64 }}" | base64 --decode > "$RUNNER_TEMP/kube/config"
+        chmod 600 "$RUNNER_TEMP/kube/config"
+        echo "KUBECONFIG=$RUNNER_TEMP/kube/config" >> "$GITHUB_ENV"
+
+    - name: Deploy to Kubernetes (production)
+      run: |
+        set -euo pipefail
+        RAW_BASE="https://raw.githubusercontent.com/${{ github.repository }}/${{ github.ref_name }}"
+        MANIFEST_BASE="$RAW_BASE/k8s-1.35-manifests"
+        kubectl apply -f "$MANIFEST_BASE/gatewayclass-ngf.yaml"
+        kubectl apply -f "$MANIFEST_BASE/global-gateway.yaml"
+        export GATEWAY_EXTERNAL_IP="${{ vars.GATEWAY_EXTERNAL_IP }}"
+        tmp_gateway_svc="$(mktemp)"
+        curl -fsSL "$MANIFEST_BASE/gateway-service.yaml" -o "$tmp_gateway_svc"
+        envsubst < "$tmp_gateway_svc" | kubectl apply -f -
+        rm -f "$tmp_gateway_svc"
+        kubectl apply -f "$MANIFEST_BASE/certificates-production.yaml"
+        export IMAGE_NAME="${IMAGE_NAME}"
+        export CALC_IMAGE_TAG="${{ needs.build.outputs.version }}"
+        tmp_prod="$(mktemp)"
+        curl -fsSL "$MANIFEST_BASE/production.yaml" -o "$tmp_prod"
+        envsubst < "$tmp_prod" | kubectl apply -f -
+        rm -f "$tmp_prod"
+        kubectl -n calc-prod set env deployment/calc APP_VERSION=${{ needs.build.outputs.version }}
+        kubectl -n calc-prod rollout status deployment/calc --timeout=5m
+
+  deploy-staging:
+    needs: [push-staging, build]
+    runs-on: ubuntu-latest
+    if: github.ref != 'refs/heads/main' && github.event_name == 'push'
+    environment: staging
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up kubectl
+      uses: azure/setup-kubectl@v4
+
+    - name: Configure kubeconfig
+      run: |
+        set -euo pipefail
+        mkdir -p "$RUNNER_TEMP/kube"
+        printf '%s' "${{ secrets.KUBE_CONFIG_B64 }}" | base64 --decode > "$RUNNER_TEMP/kube/config"
+        chmod 600 "$RUNNER_TEMP/kube/config"
+        echo "KUBECONFIG=$RUNNER_TEMP/kube/config" >> "$GITHUB_ENV"
+
+    - name: Deploy to Kubernetes (staging)
+      run: |
+        set -euo pipefail
+        RAW_BASE="https://raw.githubusercontent.com/${{ github.repository }}/${{ github.ref_name }}"
+        MANIFEST_BASE="$RAW_BASE/k8s-1.35-manifests"
+        kubectl apply -f "$MANIFEST_BASE/gatewayclass-ngf.yaml"
+        kubectl apply -f "$MANIFEST_BASE/global-gateway.yaml"
+        export GATEWAY_EXTERNAL_IP="${{ vars.GATEWAY_EXTERNAL_IP }}"
+        tmp_gateway_svc="$(mktemp)"
+        curl -fsSL "$MANIFEST_BASE/gateway-service.yaml" -o "$tmp_gateway_svc"
+        envsubst < "$tmp_gateway_svc" | kubectl apply -f -
+        rm -f "$tmp_gateway_svc"
+        kubectl apply -f "$MANIFEST_BASE/certificates-staging.yaml"
+        export IMAGE_NAME="${IMAGE_NAME}"
+        export CALC_IMAGE_TAG="${{ needs.build.outputs.commit_tag }}"
+        tmp_staging="$(mktemp)"
+        curl -fsSL "$MANIFEST_BASE/staging.yaml" -o "$tmp_staging"
+        envsubst < "$tmp_staging" | kubectl apply -f -
+        rm -f "$tmp_staging"
+        kubectl -n calc-staging set env deployment/calc APP_VERSION=${{ needs.build.outputs.commit_tag }}
+        kubectl -n calc-staging rollout status deployment/calc --timeout=5m

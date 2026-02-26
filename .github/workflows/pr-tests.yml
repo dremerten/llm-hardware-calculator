@@ -1,0 +1,76 @@
+name: PR Tests and Scan
+
+on:
+  pull_request:
+    branches: [ "main" ]
+
+concurrency:
+  group: calc-${{ github.event.pull_request.head.ref || github.ref_name }}
+  cancel-in-progress: false
+
+env:
+  IMAGE_NAME: ${{ vars.DOCKERHUB_USERNAME }}/llm-hardware-calculator
+
+jobs:
+  build-test-scan:
+    runs-on: ubuntu-latest
+    environment: staging
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Derive image tag from PR head
+      run: |
+        set -euo pipefail
+        pr_sha="${{ github.event.pull_request.head.sha }}"
+        echo "IMAGE_TAG=commit-${pr_sha:0:7}" >> "$GITHUB_ENV"
+
+    - name: Log in to Docker Hub (same-repo PRs)
+      if: github.event.pull_request.head.repo.full_name == github.repository
+      uses: docker/login-action@v3
+      with:
+        username: ${{ vars.DOCKERHUB_USERNAME }}
+        password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+    - name: Pull dev image (from branch push) or build locally
+      run: |
+        set -euo pipefail
+        if docker pull "${IMAGE_NAME}:${IMAGE_TAG}"; then
+          echo "IMAGE_SOURCE=pulled" >> "$GITHUB_ENV"
+          exit 0
+        fi
+
+        echo "Image not found in registry, building locally for PR tests..."
+        docker build -t "${IMAGE_NAME}:${IMAGE_TAG}" .
+        echo "IMAGE_SOURCE=built" >> "$GITHUB_ENV"
+
+        if [ "${{ github.event.pull_request.head.repo.full_name }}" = "${{ github.repository }}" ]; then
+          echo "Pushing locally-built image to registry for promotion..."
+          docker push "${IMAGE_NAME}:${IMAGE_TAG}"
+        else
+          echo "Fork PR detected; skipping image push."
+        fi
+
+    - name: Run tests against test image
+      run: |
+        docker run -d -p 8080:8080 --name test-container ${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}
+        sleep 5
+        docker ps | grep test-container
+        curl -f -s http://localhost:8080 | grep -q "Hardware Calculator" || exit 1
+        HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8080)
+        if [ "$HTTP_CODE" != "200" ]; then
+          echo "Error: Expected HTTP 200, got $HTTP_CODE"
+          exit 1
+        fi
+        docker stop test-container
+        docker rm test-container
+
+    - name: Run Trivy vulnerability scanner
+      uses: aquasecurity/trivy-action@master
+      with:
+        image-ref: ${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}
+        format: 'table'
+        exit-code: '1'
+        ignore-unfixed: true
+        severity: 'CRITICAL,HIGH'
