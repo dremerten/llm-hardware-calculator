@@ -9,7 +9,7 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  IMAGE_NAME: ${{ vars.DOCKERHUB_USERNAME }}/llm-hardware-calculator
+  IMAGE_NAME: ${{ vars.IMAGE_NAME != '' && vars.IMAGE_NAME || format('{0}/llm-hardware-calculator', vars.DOCKERHUB_USERNAME) }}
 
 jobs:
   build-test-scan:

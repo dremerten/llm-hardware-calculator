@@ -19,7 +19,7 @@ permissions:
   security-events: write
 
 env:
-  IMAGE_NAME: ${{ vars.DOCKERHUB_USERNAME }}/llm-hardware-calculator
+  IMAGE_NAME: ${{ vars.IMAGE_NAME != '' && vars.IMAGE_NAME || format('{0}/llm-hardware-calculator', vars.DOCKERHUB_USERNAME) }}
 
 jobs:
   build:
@@ -32,6 +32,8 @@ jobs:
       ref_name: ${{ github.ref_name }}
       display_version: ${{ steps.version.outputs.display_version }}
       commit_tag: ${{ steps.meta.outputs.commit_tag }}
+      source_commit_tag: ${{ steps.source_tag.outputs.source_commit_tag }}
+      should_build: ${{ steps.source_tag.outputs.should_build }}
 
     steps:
     - name: Checkout code
@@ -48,6 +50,44 @@ jobs:
         short="${GITHUB_SHA::7}"
         echo "short_sha=${short}" >> "$GITHUB_OUTPUT"
         echo "commit_tag=commit-${short}" >> "$GITHUB_OUTPUT"
+
+    - name: Resolve source SHA (PR head for main)
+      id: source
+      if: github.ref == 'refs/heads/main'
+      uses: actions/github-script@v7
+      with:
+        script: |
+          const { owner, repo } = context.repo;
+          const commitSha = context.sha;
+          const prs = await github.request('GET /repos/{owner}/{repo}/commits/{commit_sha}/pulls', {
+            owner,
+            repo,
+            commit_sha: commitSha,
+            mediaType: { previews: ['groot'] },
+          });
+          let sourceSha = commitSha;
+          if (prs.data && prs.data.length > 0) {
+            sourceSha = prs.data[0].head.sha;
+          }
+          core.setOutput('source_sha', sourceSha);
+
+    - name: Set source image tag
+      id: source_tag
+      run: |
+        set -euo pipefail
+        if [ "${GITHUB_REF}" = "refs/heads/main" ] && [ -n "${{ steps.source.outputs.source_sha }}" ]; then
+          source_sha="${{ steps.source.outputs.source_sha }}"
+        else
+          source_sha="${GITHUB_SHA}"
+        fi
+        short="${source_sha::7}"
+        if [ "${GITHUB_REF}" = "refs/heads/main" ] && [ "$source_sha" != "${GITHUB_SHA}" ]; then
+          should_build="false"
+        else
+          should_build="true"
+        fi
+        echo "source_commit_tag=commit-${short}" >> "$GITHUB_OUTPUT"
+        echo "should_build=${should_build}" >> "$GITHUB_OUTPUT"
 
     - name: Determine build version
       id: version
@@ -89,6 +129,7 @@ jobs:
         echo "display_version=$display_version" >> "$GITHUB_OUTPUT"
 
     - name: Build Docker image (calc)
+      if: steps.source_tag.outputs.should_build == 'true'
       uses: docker/build-push-action@v5
       with:
         context: .
@@ -101,26 +142,27 @@ jobs:
         build-args: |
           VITE_APP_VERSION=${{ steps.version.outputs.display_version }}
 
-    - name: Load image (main only)
-      if: github.ref == 'refs/heads/main'
-      run: |
-        set -euo pipefail
-        docker load --input /tmp/image.tar
-
     - name: Log in to Docker Hub (main only)
-      if: github.ref == 'refs/heads/main'
+      if: github.ref == 'refs/heads/main' && steps.source_tag.outputs.should_build == 'true'
       uses: docker/login-action@v3
       with:
         username: ${{ vars.DOCKERHUB_USERNAME }}
         password: ${{ secrets.DOCKERHUB_TOKEN }}
 
+    - name: Load image (main only)
+      if: github.ref == 'refs/heads/main' && steps.source_tag.outputs.should_build == 'true'
+      run: |
+        set -euo pipefail
+        docker load --input /tmp/image.tar
+
     - name: Push image (commit tag, main only)
-      if: github.ref == 'refs/heads/main'
+      if: github.ref == 'refs/heads/main' && steps.source_tag.outputs.should_build == 'true'
       run: |
         set -euo pipefail
         docker push "${IMAGE_NAME}:${{ steps.meta.outputs.commit_tag }}"
 
     - name: Upload Docker image artifact
+      if: github.ref != 'refs/heads/main'
       uses: actions/upload-artifact@v4
       with:
         name: calc-image
@@ -133,7 +175,7 @@ jobs:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     environment: production
     env:
-      IMAGE_TAG: ${{ needs.build.outputs.commit_tag }}
+      IMAGE_TAG: ${{ needs.build.outputs.source_commit_tag }}
 
     steps:
     - name: Log in to Docker Hub
@@ -166,7 +208,7 @@ jobs:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     environment: production
     env:
-      IMAGE_TAG: ${{ needs.build.outputs.commit_tag }}
+      IMAGE_TAG: ${{ needs.build.outputs.source_commit_tag }}
 
     steps:
     - name: Log in to Docker Hub
@@ -234,7 +276,7 @@ jobs:
 
     - name: Pull source image to promote
       env:
-        SOURCE_COMMIT_TAG: ${{ needs.build.outputs.commit_tag }}
+        SOURCE_COMMIT_TAG: ${{ needs.build.outputs.source_commit_tag }}
       run: |
         set -euo pipefail
         docker pull "${IMAGE_NAME}:${SOURCE_COMMIT_TAG}"
@@ -242,7 +284,7 @@ jobs:
     - name: Tag and push image
       env:
         VERSION: ${{ needs.build.outputs.version }}
-        SOURCE_COMMIT_TAG: ${{ needs.build.outputs.commit_tag }}
+        SOURCE_COMMIT_TAG: ${{ needs.build.outputs.source_commit_tag }}
       run: |
         set -euo pipefail
         IMG="${IMAGE_NAME}"
