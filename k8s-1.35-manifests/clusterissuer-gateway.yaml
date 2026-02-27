@@ -13,6 +13,5 @@ spec:
     - http01:
         gatewayHTTPRoute:
           parentRefs:
-          - name: global-gateway
+          - name: acme-gateway
             namespace: nginx-gateway
-            sectionName: acme-http

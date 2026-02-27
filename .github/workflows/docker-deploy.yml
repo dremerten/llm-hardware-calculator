@@ -354,11 +354,16 @@ jobs:
         MANIFEST_BASE="$RAW_BASE/k8s-1.35-manifests"
         kubectl apply -f "$MANIFEST_BASE/gatewayclass-ngf.yaml"
         kubectl apply -f "$MANIFEST_BASE/global-gateway.yaml"
+        kubectl apply -f "$MANIFEST_BASE/acme-gateway.yaml"
         export GATEWAY_EXTERNAL_IP="${{ vars.GATEWAY_EXTERNAL_IP }}"
         tmp_gateway_svc="$(mktemp)"
         curl -fsSL "$MANIFEST_BASE/gateway-service.yaml" -o "$tmp_gateway_svc"
         envsubst < "$tmp_gateway_svc" | kubectl apply -f -
         rm -f "$tmp_gateway_svc"
+        tmp_acme_svc="$(mktemp)"
+        curl -fsSL "$MANIFEST_BASE/acme-gateway-service.yaml" -o "$tmp_acme_svc"
+        envsubst < "$tmp_acme_svc" | kubectl apply -f -
+        rm -f "$tmp_acme_svc"
         kubectl apply -f "$MANIFEST_BASE/certificates-production.yaml"
         export IMAGE_NAME="${IMAGE_NAME}"
         export CALC_IMAGE_TAG="${{ needs.build.outputs.version }}"
@@ -397,11 +402,16 @@ jobs:
         MANIFEST_BASE="$RAW_BASE/k8s-1.35-manifests"
         kubectl apply -f "$MANIFEST_BASE/gatewayclass-ngf.yaml"
         kubectl apply -f "$MANIFEST_BASE/global-gateway.yaml"
+        kubectl apply -f "$MANIFEST_BASE/acme-gateway.yaml"
         export GATEWAY_EXTERNAL_IP="${{ vars.GATEWAY_EXTERNAL_IP }}"
         tmp_gateway_svc="$(mktemp)"
         curl -fsSL "$MANIFEST_BASE/gateway-service.yaml" -o "$tmp_gateway_svc"
         envsubst < "$tmp_gateway_svc" | kubectl apply -f -
         rm -f "$tmp_gateway_svc"
+        tmp_acme_svc="$(mktemp)"
+        curl -fsSL "$MANIFEST_BASE/acme-gateway-service.yaml" -o "$tmp_acme_svc"
+        envsubst < "$tmp_acme_svc" | kubectl apply -f -
+        rm -f "$tmp_acme_svc"
         kubectl apply -f "$MANIFEST_BASE/certificates-staging.yaml"
         export IMAGE_NAME="${IMAGE_NAME}"
         export CALC_IMAGE_TAG="${{ needs.build.outputs.commit_tag }}"
